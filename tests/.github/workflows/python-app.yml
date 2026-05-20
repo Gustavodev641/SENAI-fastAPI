@@ -1,0 +1,134 @@
+name: Python application
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "prin", "dev" ]
+
+env:
+  IMAGE_NAME: SEU_USUARIO_DOCKER/senai_api
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.11"
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 pytest
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+    
+    - name: Testando o Codigo
+      run: |
+        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+       
+    - name: Executar o pytest no projeto
+      run: |
+        PYTHONPATH=. pytest tests/ -v --tb=short
+
+  Imagem:
+    name: Construindo Imagem para Docker
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker Login
+        uses: docker/login-action@v4.1.0
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PWD }}
+      
+      - name: Construir e subir imagem
+        uses: docker/build-push-action@v7.1.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  DEPLOY-HOMOL:
+    if: github.ref == 'refs/heads/dev'
+    name: Deploy Homologacao
+    runs-on: ubuntu-latest
+    needs: Imagem
+    environment:
+      name: Dev
+
+    steps:
+      - name: Deploy na EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_EC2_HOST }}
+          username: ${{ secrets.DEV_EC2_USER }}
+          key: ${{ secrets.DEV_EC2_KEY }}
+          script: |
+            echo "Acesso liberado - HOMOLOGACAO"
+
+            sudo rm -f /var/lib/dpkg/lock
+            sudo apt update
+            sudo apt-get install ca-certificates curl gnupg -y
+
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+
+            sudo docker pull SEU_USUARIO_DOCKER/senai_api:latest
+
+            sudo docker stop senai_api 2>/dev/null || true
+            sudo docker rm senai_api 2>/dev/null || true
+
+            sudo docker run --name senai_api -d -p 8080:8080 SEU_USUARIO_DOCKER/senai_api:latest
+
+            sleep 5
+            curl -f http://localhost:8080/health || exit 1
+            echo "Deploy feito com sucesso EM HOMOLOGACAO"
+
+  DEPLOY:
+    if: github.ref == 'refs/heads/prin'
+    name: Deploy Producao
+    runs-on: ubuntu-latest
+    needs: Imagem
+    environment:
+      name: Prod
+
+    steps:
+      - name: Deploy na EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_KEY }}
+          script: |
+            echo "Acesso liberado - PRODUCAO"
+
+            sudo rm -f /var/lib/dpkg/lock
+            sudo apt update
+            sudo apt-get install ca-certificates curl gnupg -y
+
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update
+            sudo apt-get install docker-ce docker-ce-cli containerd.io -y
+
+            sudo docker pull SEU_USUARIO_DOCKER/senai_api:latest
+
+            sudo docker stop senai_api 2>/dev/null || true
+            sudo docker rm senai_api 2>/dev/null || true
+
+            sudo docker run --name senai_api -d -p 80:8080 SEU_USUARIO_DOCKER/senai_api:latest
+
+            sleep 5
+            curl -f http://localhost/health || exit 1
+            echo "Deploy feito com sucesso EM PRODUCAO"
